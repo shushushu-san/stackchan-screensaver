@@ -47,6 +47,10 @@ class StackchanSaverView: ScreenSaverView {
     private var prevCPU: (busy: Double, total: Double)?
     private var sampleAccum: Double = 0
 
+    // --- プレビュー用: キーで表情を固定（nil=自動） ---
+    var testKeysEnabled = false
+    var forcedExpr: Expression?
+
     override init?(frame: NSRect, isPreview: Bool) {
         super.init(frame: frame, isPreview: isPreview)
         animationTimeInterval = 1.0 / 60.0
@@ -111,6 +115,7 @@ class StackchanSaverView: ScreenSaverView {
     }
 
     private func updateExpression() {
+        if let f = forcedExpr { expr = f; return }
         if cpuLoad > 0.7 { expr = .angry }
         else if isCharging { expr = .happy }
         else if battery < 0.2 { expr = .sleepy }
@@ -211,6 +216,26 @@ class StackchanSaverView: ScreenSaverView {
         case .angry, .neutral:
             break
         }
+    }
+
+    // MARK: - プレビューのキー操作（testKeysEnabled の時だけ有効）
+
+    override var acceptsFirstResponder: Bool { testKeysEnabled }
+
+    override func keyDown(with event: NSEvent) {
+        guard testKeysEnabled else { super.keyDown(with: event); return }
+        switch event.charactersIgnoringModifiers {
+        case "n": forcedExpr = .neutral
+        case "h": forcedExpr = .happy
+        case "a": forcedExpr = .angry
+        case "s": forcedExpr = .sleepy
+        case "0", " ": forcedExpr = nil   // 自動（実際の状態に戻る）
+        default: super.keyDown(with: event); return
+        }
+        let label = forcedExpr.map { "\($0)" } ?? "auto"
+        Swift.print("expr -> \(label)")
+        updateExpression()
+        setNeedsDisplay(bounds)
     }
 
     override var hasConfigureSheet: Bool { false }

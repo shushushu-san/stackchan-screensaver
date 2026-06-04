@@ -19,10 +19,12 @@ struct Preview {
         let win = NSWindow(contentRect: frame,
                            styleMask: [.titled, .closable, .resizable, .miniaturizable],
                            backing: .buffered, defer: false)
-        win.title = "Stackchan Preview"
+        win.title = "Stackchan Preview  [n]通常 [h]嬉しい [a]怒り [s]眠い [space]自動"
+        view.testKeysEnabled = true
         win.contentView = view
         win.center()
         win.makeKeyAndOrderFront(nil)
+        win.makeFirstResponder(view)
 
         view.startAnimation()
         app.activate(ignoringOtherApps: true)
