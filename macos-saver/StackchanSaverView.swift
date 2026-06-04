@@ -114,11 +114,14 @@ class StackchanSaverView: ScreenSaverView {
         }
     }
 
+    private let sleepyAfterSec: Double = 120  // この秒数より長く表示され続けたら眠い
+
     private func updateExpression() {
         if let f = forcedExpr { expr = f; return }
-        if cpuLoad > 0.7 { expr = .angry }
-        else if isCharging { expr = .happy }
-        else if battery < 0.2 { expr = .sleepy }
+        if cpuLoad > 0.7 { expr = .angry }            // CPU 使いすぎ
+        else if isCharging { expr = .happy }          // 充電中
+        else if battery < 0.2 { expr = .sad }         // 電池少ない
+        else if t > sleepyAfterSec { expr = .sleepy } // 長時間表示
         else { expr = .neutral }
     }
 
