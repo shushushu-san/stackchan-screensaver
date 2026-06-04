@@ -12,6 +12,7 @@
 import ScreenSaver
 import Cocoa
 
+@objc(StackchanSaverView)
 class StackchanSaverView: ScreenSaverView {
 
     // --- 仮想画面 (M5 の 320x240) ---
