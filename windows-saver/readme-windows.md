@@ -37,6 +37,20 @@ Windows を放置（無操作）すると、スタックちゃん風の顔が全
 3. スクリーンセーバー設定ダイアログが自動で開く
 4. リストから **「StackchanSaver」** を選んで OK
 
+> **UAC コピーが失敗する場合**（System32 の SCR が更新されない）、
+> PowerShell を**管理者として実行**して手動コピーしてください:
+>
+> ```powershell
+> Copy-Item ".\build\StackchanSaver.scr" "$env:SystemRoot\System32\StackchanSaver.scr" -Force
+> ```
+>
+> コピー済みか確認するには、更新日時を比較します:
+>
+> ```powershell
+> (Get-Item "$env:SystemRoot\System32\StackchanSaver.scr").LastWriteTime
+> (Get-Item ".\build\StackchanSaver.scr").LastWriteTime
+> ```
+
 ### その他のビルドコマンド
 
 | コマンド | 内容 |
@@ -155,6 +169,20 @@ Open PowerShell inside the `windows-saver/` folder:
 
 This builds a single-file `.scr`, copies it to System32 (UAC prompt), and opens the
 Screen Saver Settings dialog. Select **StackchanSaver** and click OK.
+
+> **If the UAC copy fails silently** (the SCR is not updated in System32),
+> open PowerShell **as Administrator** and run:
+>
+> ```powershell
+> Copy-Item ".\build\StackchanSaver.scr" "$env:SystemRoot\System32\StackchanSaver.scr" -Force
+> ```
+>
+> You can verify the file is up to date by comparing timestamps:
+>
+> ```powershell
+> (Get-Item "$env:SystemRoot\System32\StackchanSaver.scr").LastWriteTime
+> (Get-Item ".\build\StackchanSaver.scr").LastWriteTime
+> ```
 
 ### Build commands
 

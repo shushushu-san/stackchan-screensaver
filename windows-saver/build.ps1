@@ -55,7 +55,7 @@ if ($act -eq "run") {
     $cmd  = "Copy-Item -Path '$scr' -Destination '$dest' -Force"
     Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile -Command $cmd"
     Write-Host "==> Opening screen saver settings..."
-    Start-Process rundll32 -ArgumentList "desk.cpl,ScreenSaverSetup"
+    Start-Process "control" -ArgumentList "desk.cpl,,@screensaver"
 
 } else {
     Invoke-DebugBuild

@@ -32,7 +32,6 @@ sealed class CameraMotionDetector : IDisposable
 
     // ── 公開 API ──────────────────────────────────────────────────────────────
 
-    /// <summary>バックグラウンドスレッドを起動してカメラ取得を開始する。</summary>
     public void Start()
     {
         _running = true;
@@ -40,7 +39,6 @@ sealed class CameraMotionDetector : IDisposable
         _thread.Start();
     }
 
-    /// <summary>スレッドを停止してカメラを解放する。</summary>
     public void Stop()
     {
         _running = false;
@@ -50,90 +48,86 @@ sealed class CameraMotionDetector : IDisposable
 
     void Loop()
     {
-        using var cap = new VideoCapture(0, VideoCaptureAPIs.DSHOW);
-
-        if (!cap.IsOpened())
+        try
         {
-            // カメラが使えない場合はサイレントに終了（動体検知なしで動く）
-            return;
-        }
+            using var cap = new VideoCapture(0, VideoCaptureAPIs.DSHOW);
 
-        cap.Set(VideoCaptureProperties.FrameWidth,  320);
-        cap.Set(VideoCaptureProperties.FrameHeight, 240);
-        cap.Set(VideoCaptureProperties.Fps, CaptureFps);
+            if (!cap.IsOpened()) return;
 
-        using var subtractor = BackgroundSubtractorMOG2.Create(
-            history:        500,
-            varThreshold:   40,
-            detectShadows:  false);
+            cap.Set(VideoCaptureProperties.FrameWidth,  320);
+            cap.Set(VideoCaptureProperties.FrameHeight, 240);
+            cap.Set(VideoCaptureProperties.Fps, CaptureFps);
 
-        using var frame    = new Mat();
-        using var gray     = new Mat();
-        using var fgMask   = new Mat();
-        using var blurred  = new Mat();
+            using var subtractor = BackgroundSubtractorMOG2.Create(
+                history:       500,
+                varThreshold:  40,
+                detectShadows: false);
 
-        int  intervalMs   = 1000 / CaptureFps;
+            using var frame   = new Mat();
+            using var gray    = new Mat();
+            using var fgMask  = new Mat();
+            using var blurred = new Mat();
 
-        while (_running)
-        {
-            long start = Environment.TickCount64;
+            int intervalMs = 1000 / CaptureFps;
 
-            if (!cap.Read(frame) || frame.Empty())
+            while (_running)
             {
-                Thread.Sleep(intervalMs);
-                continue;
-            }
+                long start = Environment.TickCount64;
 
-            // グレースケール化 → ブラーでノイズ低減
-            Cv2.CvtColor(frame, gray, ColorConversionCodes.BGR2GRAY);
-            Cv2.GaussianBlur(gray, blurred, new OpenCvSharp.Size(5, 5), 0);
-
-            // MOG2 背景差分 → 前景マスク
-            subtractor.Apply(blurred, fgMask);
-
-            // 輪郭抽出で各動体領域を取得
-            Cv2.FindContours(
-                fgMask,
-                out OpenCvSharp.Point[][] contours,
-                out _,
-                RetrievalModes.External,
-                ContourApproximationModes.ApproxSimple);
-
-            double  bestArea   = 0;
-    OpenCvSharp.Point2f centroid   = default;
-
-            foreach (var c in contours)
-            {
-                double area = Cv2.ContourArea(c);
-                if (area > bestArea)
+                if (!cap.Read(frame) || frame.Empty())
                 {
-                    bestArea = area;
-                    var m    = Cv2.Moments(c);
-                    if (m.M00 > 0)
-                        centroid = new OpenCvSharp.Point2f((float)(m.M10 / m.M00), (float)(m.M01 / m.M00));
+                    Thread.Sleep(intervalMs);
+                    continue;
                 }
-            }
 
-            if (bestArea >= MinMotionArea)
-            {
-                // 正規化: (0〜width) → (-1〜+1)
-                // normX は左右を反転（カメラ座標は㟏軻小が左、画面視線は右に動いてほしい）
-                float normX = -((centroid.X / frame.Width  - 0.5f) * 2f);
-                float normY =   (centroid.Y / frame.Height - 0.5f) * 2f;
+                Cv2.CvtColor(frame, gray, ColorConversionCodes.BGR2GRAY);
+                Cv2.GaussianBlur(gray, blurred, new OpenCvSharp.Size(5, 5), 0);
+                subtractor.Apply(blurred, fgMask);
 
-                _hasMotion = true;
-                MotionDetected?.Invoke(normX, normY);
-            }
-            else if (_hasMotion)
-            {
-                _hasMotion = false;
-                MotionLost?.Invoke();
-            }
+                Cv2.FindContours(
+                    fgMask,
+                    out OpenCvSharp.Point[][] contours,
+                    out _,
+                    RetrievalModes.External,
+                    ContourApproximationModes.ApproxSimple);
 
-            // フレームレート調整
-            int elapsed = (int)(Environment.TickCount64 - start);
-            int wait    = Math.Max(0, intervalMs - elapsed);
-            if (wait > 0) Thread.Sleep(wait);
+                double bestArea = 0;
+                OpenCvSharp.Point2f centroid = default;
+
+                foreach (var c in contours)
+                {
+                    double area = Cv2.ContourArea(c);
+                    if (area > bestArea)
+                    {
+                        bestArea = area;
+                        var m = Cv2.Moments(c);
+                        if (m.M00 > 0)
+                            centroid = new OpenCvSharp.Point2f(
+                                (float)(m.M10 / m.M00), (float)(m.M01 / m.M00));
+                    }
+                }
+
+                if (bestArea >= MinMotionArea)
+                {
+                    float normX = -((centroid.X / frame.Width  - 0.5f) * 2f);
+                    float normY =   (centroid.Y / frame.Height - 0.5f) * 2f;
+                    _hasMotion = true;
+                    MotionDetected?.Invoke(normX, normY);
+                }
+                else if (_hasMotion)
+                {
+                    _hasMotion = false;
+                    MotionLost?.Invoke();
+                }
+
+                int elapsed = (int)(Environment.TickCount64 - start);
+                int wait    = Math.Max(0, intervalMs - elapsed);
+                if (wait > 0) Thread.Sleep(wait);
+            }
+        }
+        catch (Exception)
+        {
+            // OpenCV ネイティブ DLL が読み込めない場合などはサイレントに終了
         }
     }
 

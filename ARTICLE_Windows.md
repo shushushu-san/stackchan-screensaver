@@ -116,3 +116,73 @@ static void AppendSquare(List<short> buf, double hz, double durationSec, double 
 - カメラ動体検知: OpenCvSharp4 MOG2、動体に視線追従・Surprised 表情
 - 電子音声: winmm waveOut PCM、7 パターンのランダム再生
 - インストール: `.\build.ps1 open` で System32 へ配置 → 設定ダイアログを開く
+
+## 実際にインストールしてみてわかったこと
+
+`.\build.ps1 open` を実際に動かしてみたら、いくつかハマりポイントがあった。
+
+### `desk.cpl,ScreenSaverSetup` が Windows 11 で動かない
+
+`Start-Process rundll32 -ArgumentList "desk.cpl,ScreenSaverSetup"` を実行したら
+「エントリがありません: ScreenSaverSetup」というエラーが出た。
+Windows 11 では `rundll32` 経由のこのエントリポイントが削除されている。
+
+代わりに `control desk.cpl,,@screensaver` を使う。
+
+```powershell
+# 修正後
+Start-Process "control" -ArgumentList "desk.cpl,,@screensaver"
+```
+
+これでスクリーンセーバー設定タブが直接開くようになった。
+
+### UAC 昇格ウィンドウでのコピーが失敗する
+
+`build.ps1 open` 内では `Start-Process powershell -Verb RunAs` で昇格した別プロセスに
+`Copy-Item` を実行させているが、UAC が承認されても実際にはコピーが失敗していた
+（エラーは昇格ウィンドウ内に出るが一瞬で閉じて見えない）。
+
+ビルド出力と System32 の SCR の更新日時を比較することで気づいた:
+
+```powershell
+(Get-Item "$env:SystemRoot\System32\StackchanSaver.scr").LastWriteTime
+(Get-Item ".\build\StackchanSaver.scr").LastWriteTime
+```
+
+日時がずれていたら失敗している。その場合は**管理者として PowerShell を起動**して直接コピーする:
+
+```powershell
+Copy-Item ".\build\StackchanSaver.scr" "$env:SystemRoot\System32\StackchanSaver.scr" -Force
+```
+
+### OpenCvSharp のネイティブ DLL が単一ファイルに同梱されない
+
+`dotnet publish -p:PublishSingleFile=true` でビルドした `.scr` を System32 から起動すると、
+`TypeInitializationException: DLL was not found.` でクラッシュした。
+
+`OpenCvSharp4.runtime.win` が提供するネイティブ `.dll` はデフォルトでは `PublishSingleFile` に同梱されない。
+`.csproj` に以下を追加することで実行時に `%TEMP%` へ自己展開されるようになり解決:
+
+```xml
+<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+```
+
+### プレビューウィンドウが設定ダイアログを閉じても残る
+
+設定ダイアログの「適用」→「OK」を押して閉じても、プレビュー用に起動した SCR プロセスが
+孤立したウィンドウとして画面左上に残り続けた。
+
+`/p HWND` モードで `SetParent` によって子ウィンドウに埋め込まれているが、
+親（ダイアログ）が閉じられてもプロセスは終了しないため。
+
+`OnHandleCreated` でタイマーを立て、500ms ごとに親 HWND の生存を確認して自動終了させた:
+
+```csharp
+var watchTimer = new System.Windows.Forms.Timer { Interval = 500 };
+watchTimer.Tick += (_, _) =>
+{
+    if (!IsWindow(_previewHandle))
+        Application.Exit();
+};
+watchTimer.Start();
+```

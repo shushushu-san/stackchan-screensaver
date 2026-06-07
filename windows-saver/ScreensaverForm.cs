@@ -38,6 +38,9 @@ sealed class ScreensaverForm : Form
     [DllImport("user32.dll")]
     static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    [DllImport("user32.dll")]
+    static extern bool IsWindow(IntPtr hWnd);
+
     [StructLayout(LayoutKind.Sequential)]
     struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -256,6 +259,15 @@ sealed class ScreensaverForm : Form
 
         GetClientRect(_previewHandle, out RECT r);
         SetBounds(0, 0, r.Right, r.Bottom);
+
+        // 親ウィンドウ（設定ダイアログ）が閉じられたらプロセスも終了する
+        var watchTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        watchTimer.Tick += (_, _) =>
+        {
+            if (!IsWindow(_previewHandle))
+                Application.Exit();
+        };
+        watchTimer.Start();
     }
 
     // ── アニメーションティック ──────────────────────────────────────────────
