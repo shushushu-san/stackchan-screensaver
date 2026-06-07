@@ -1,12 +1,18 @@
 # スタックちゃんスクリーンセーバーを Windows に移植した
 
-macOS 版が動いたので、次は Windows でも動かしたくなった。
+[bruiselea](https://github.com/bruiselea) さんが作った [stackchan-screensaver](https://github.com/bruiselea/stackchan-screensaver)（macOS 版）をフォークして、Windows でも動くようにした。
 
 ---
 
+## きっかけ
+
+bruiselea の macOS 版スクリーンセーバーを見て、Windows でも使いたいと思った。
+macOS 版は Swift + `ScreenSaverView` で書かれており、そのままでは Windows に持っていけない。
+フォークして Windows 版を追加することにした。
+
 ## 言語選定
 
-macOS 版は Swift + `ScreenSaverView` で書いた。Windows にはそのまま持っていけない。
+macOS 版は Swift + `ScreenSaverView` で書かれている。Windows にはそのまま持っていけない。
 
 選択肢を整理すると:
 
@@ -22,7 +28,7 @@ C# / WinForms を選んだ。
 
 **座標系の変換が不要になった。**
 
-Swift の `NSView` は左下原点・Y 上向きなので、macOS 版では `py(y) = H - (offY + y*scale)` という Y 反転が必要だった。WinForms は左上原点・Y 下向きなので `py(y) = offY + y*scale` でそのまま使える。それ以外の座標数値（目の位置・サイズ・口の位置など）はすべて本家 m5stack-avatar の値をそのまま流用できた。
+macOS 版（`NSView`）は左下原点・Y 上向きなので、`py(y) = H - (offY + y*scale)` という Y 反転が必要だった。WinForms は左上原点・Y 下向きなので `py(y) = offY + y*scale` でそのまま使える。それ以外の座標数値（目の位置・サイズ・口の位置など）はすべて本家 m5stack-avatar の値をそのまま流用できた。
 
 **API の対応:**
 
