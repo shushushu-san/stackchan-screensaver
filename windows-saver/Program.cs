@@ -20,6 +20,13 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
+        // 未処理例外をメッセージボックスで表示（デバッグ用）
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+            MessageBox.Show(e.Exception.ToString(), "StackchanSaver Error");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            MessageBox.Show(e.ExceptionObject.ToString(), "StackchanSaver Fatal");
+
         if (args.Length == 0)
         {
             ShowConfig();

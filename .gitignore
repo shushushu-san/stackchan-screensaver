@@ -1,3 +1,10 @@
 node_modules/
 dist/
 .DS_Store
+
+# C# build artifacts
+windows-saver/bin/
+windows-saver/obj/
+windows-saver/build/debug/
+windows-saver/build/release/
+

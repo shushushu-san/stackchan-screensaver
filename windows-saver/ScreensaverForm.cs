@@ -54,6 +54,35 @@ sealed class ScreensaverForm : Form
         out FILETIME lpKernelTime,
         out FILETIME lpUserTime);
 
+    // ── winmm P/Invoke ────────────────────────────────────────────────────────
+
+    const int WAVE_FORMAT_PCM = 1;
+    const int CALLBACK_NULL   = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct WAVEFORMATEX
+    {
+        public ushort wFormatTag, nChannels;
+        public uint   nSamplesPerSec, nAvgBytesPerSec;
+        public ushort nBlockAlign, wBitsPerSample, cbSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct WAVEHDR
+    {
+        public IntPtr lpData;
+        public uint   dwBufferLength, dwBytesRecorded, dwUser, dwFlags, dwLoops;
+        public IntPtr lpNext;
+        public IntPtr reserved;
+    }
+
+    [DllImport("winmm.dll")] static extern int waveOutOpen(out IntPtr hWaveOut, uint uDeviceID, ref WAVEFORMATEX lpFormat, IntPtr dwCallback, IntPtr dwInstance, uint fdwOpen);
+    [DllImport("winmm.dll")] static extern int waveOutPrepareHeader(IntPtr hWaveOut, ref WAVEHDR lpWaveOutHdr, uint uSize);
+    [DllImport("winmm.dll")] static extern int waveOutWrite(IntPtr hWaveOut, ref WAVEHDR lpWaveOutHdr, uint uSize);
+    [DllImport("winmm.dll")] static extern int waveOutUnprepareHeader(IntPtr hWaveOut, ref WAVEHDR lpWaveOutHdr, uint uSize);
+    [DllImport("winmm.dll")] static extern int waveOutClose(IntPtr hWaveOut);
+    [DllImport("winmm.dll")] static extern int waveOutReset(IntPtr hWaveOut);
+
     const int GWL_STYLE  = -16;
     const int WS_CHILD   = 0x40000000;
     const int WS_VISIBLE = 0x10000000;
@@ -71,7 +100,7 @@ sealed class ScreensaverForm : Form
     const float MinH       = 4f;
     const double SleepyAfterSec = 300.0;   // 5 分以上表示 → 眠い
 
-    enum Expr { Neutral, Happy, Angry, Sad, Sleepy }
+    enum Expr { Neutral, Happy, Angry, Sad, Sleepy, Surprised }
 
     // ── アニメーション状態 ───────────────────────────────────────────────────
 
@@ -93,6 +122,16 @@ sealed class ScreensaverForm : Form
 
     // GetSystemTimes 前回値（差分で CPU 使用率を算出）
     long _prevIdle, _prevKernel, _prevUser;
+
+    // ── カメラ動体検知 ────────────────────────────────────────────────────────
+
+    CameraMotionDetector _camera;
+    // Surprised 表情の自動解除時刻 (0 = 非アクティブ)
+    double _surprisedUntil;
+    // カメラ検知で上書きする視線ターゲット (null = 使わない)
+    float? _camTgx, _camTgy;
+    // 最後に発話した時刻（初期値は -∞ 扱いにするため十分負にする）
+    double _lastTalkedAt = -999;
 
     // ── GDI+ ブラシ（フレームごとに生成しないようキャッシュ） ────────────────
 
@@ -166,6 +205,37 @@ sealed class ScreensaverForm : Form
         _animTimer = new System.Windows.Forms.Timer { Interval = 16 }; // ~60fps
         _animTimer.Tick += (_, _) => Tick();
         _animTimer.Start();
+
+        // カメラ動体検知を開始（カメラなし環境ではサイレントにスキップ）
+        _camera = new CameraMotionDetector();
+        _camera.MotionDetected += OnMotionDetected;
+        _camera.MotionLost     += OnMotionLost;
+        _camera.Start();
+    }
+
+    // ── カメライベントハンドラー（バックグラウンドスレッドから呼ばれる） ────
+
+    void OnMotionDetected(float normX, float normY)
+    {
+        // UI スレッドへマーシャリング
+        if (IsDisposed) return;
+        try
+        {
+            Invoke(() =>
+            {
+                _camTgx         = normX;
+                _camTgy         = normY;
+                _surprisedUntil = _t + 2.0;   // 2 秒間 Surprised 表情を維持
+            });
+        }
+        catch (ObjectDisposedException) { }
+    }
+
+    void OnMotionLost()
+    {
+        if (IsDisposed) return;
+        try { Invoke(() => { _camTgx = null; _camTgy = null; }); }
+        catch (ObjectDisposedException) { }
     }
 
     // ── プレビューパネルへの埋め込み ─────────────────────────────────────────
@@ -207,6 +277,19 @@ sealed class ScreensaverForm : Form
             UpdateExpr();
         }
 
+        // Surprised 表情: カメラ検知中かつ維持期間内
+        if (_camTgx.HasValue || _t < _surprisedUntil)
+            _expr = Expr.Surprised;
+
+        // Surprised 中で、前回発話から 4 秒以上経過していたら発話
+        if (_expr == Expr.Surprised && _t - _lastTalkedAt >= 4.0)
+        {
+            _lastTalkedAt = _t;
+            Task.Run(PlayTalkSound).ContinueWith(
+                t => { /* 例外を静かに無視 */ },
+                TaskContinuationOptions.OnlyOnFaulted);
+        }
+
         // 瞬き
         if (_t >= _nextBlink && _t >= _blinkUntil)
         {
@@ -215,7 +298,13 @@ sealed class ScreensaverForm : Form
         }
 
         // 視線移動ターゲットを更新
-        if (_t >= _nextGaze)
+        // カメラ検知中はカメラの重心方向を優先する
+        if (_camTgx.HasValue)
+        {
+            _tgx = _camTgx.Value;
+            _tgy = _camTgy.Value;
+        }
+        else if (_t >= _nextGaze)
         {
             _tgx = (float)(_rng.NextDouble() * 2.0 - 1.0);
             _tgy = (float)(_rng.NextDouble() * 2.0 - 1.0);
@@ -223,7 +312,9 @@ sealed class ScreensaverForm : Form
         }
 
         // 視線を目標に向けてなめらかに補間
-        float k = Math.Min(1f, (float)dt * 4f);
+        // カメラ追跡中は指数「8」で滑らかに追従、通常は「4」
+        float trackSpeed = _camTgx.HasValue ? 8f : 4f;
+        float k = Math.Min(1f, (float)dt * trackSpeed);
         _gx += (_tgx - _gx) * k;
         _gy += (_tgy - _gy) * k;
 
@@ -232,6 +323,211 @@ sealed class ScreensaverForm : Form
 
     void ScheduleBlink() => _nextBlink = _t + 2.0 + _rng.NextDouble() * 4.0;
     void ScheduleGaze()  => _nextGaze  = _t + 2.5 + _rng.NextDouble() * 4.0;
+
+    // ── 電子音で話しかける（waveOut PCM 矩形波） ──────────────────────────────
+
+    const int   SampleRate = 44100;
+    const short WaveAmp    = 8000;
+
+    static void AppendSquare(List<short> buf, double hz, double durationSec, double duty = 0.5)
+    {
+        int    n        = (int)(SampleRate * durationSec);
+        double phase    = 0;
+        double phaseInc = hz / SampleRate;
+        for (int i = 0; i < n; i++)
+        {
+            buf.Add(phase < duty ? WaveAmp : (short)(-WaveAmp));
+            phase += phaseInc;
+            if (phase >= 1.0) phase -= 1.0;
+        }
+    }
+
+    static void AppendGlide(List<short> buf, double fromHz, double toHz, double durationSec, double duty = 0.5)
+    {
+        int    n     = (int)(SampleRate * durationSec);
+        double phase = 0;
+        for (int i = 0; i < n; i++)
+        {
+            double t  = (double)i / n;
+            double hz = fromHz + (toHz - fromHz) * t;
+            buf.Add(phase < duty ? WaveAmp : (short)(-WaveAmp));
+            phase += hz / SampleRate;
+            if (phase >= 1.0) phase -= 1.0;
+        }
+    }
+
+    static void AppendVibrato(List<short> buf, double hz, double durationSec,
+                              double vibratoRate = 6.0, double vibratoDepth = 12.0, double duty = 0.5)
+    {
+        int    n     = (int)(SampleRate * durationSec);
+        double phase = 0;
+        for (int i = 0; i < n; i++)
+        {
+            double t      = (double)i / SampleRate;
+            double instHz = hz + vibratoDepth * Math.Sin(2 * Math.PI * vibratoRate * t);
+            buf.Add(phase < duty ? WaveAmp : (short)(-WaveAmp));
+            phase += instHz / SampleRate;
+            if (phase >= 1.0) phase -= 1.0;
+        }
+    }
+
+    static void AppendSilence(List<short> buf, double durationSec)
+    {
+        int n = (int)(SampleRate * durationSec);
+        for (int i = 0; i < n; i++) buf.Add(0);
+    }
+
+    // ── 発話パターン 1〜4: スタッカート ──────────────────────────────────────
+
+    static short[] TalkPopo()
+    {
+        var b = new List<short>();
+        AppendSquare(b, 600,  0.07);
+        AppendSilence(b, 0.025);
+        AppendSquare(b, 800,  0.07);
+        AppendSilence(b, 0.025);
+        AppendSquare(b, 500,  0.09);
+        return b.ToArray();
+    }
+
+    static short[] TalkPipopo()
+    {
+        var b = new List<short>();
+        AppendSquare(b, 700,  0.065);
+        AppendSilence(b, 0.022);
+        AppendSquare(b, 1000, 0.055);
+        AppendSilence(b, 0.022);
+        AppendSquare(b, 650,  0.065);
+        AppendSilence(b, 0.022);
+        AppendSquare(b, 750,  0.085);
+        return b.ToArray();
+    }
+
+    static short[] TalkPipapopo()
+    {
+        var b = new List<short>();
+        AppendSquare(b, 600,  0.065);
+        AppendSilence(b, 0.020);
+        AppendSquare(b, 950,  0.055);
+        AppendSilence(b, 0.020);
+        AppendSquare(b, 800,  0.065);
+        AppendSilence(b, 0.020);
+        AppendSquare(b, 550,  0.070);
+        AppendSilence(b, 0.020);
+        AppendSquare(b, 700,  0.085);
+        return b.ToArray();
+    }
+
+    static short[] TalkPopopipapopo()
+    {
+        var b = new List<short>();
+        AppendSquare(b, 650,  0.060);
+        AppendSilence(b, 0.018);
+        AppendSquare(b, 900,  0.055);
+        AppendSilence(b, 0.018);
+        AppendSquare(b, 600,  0.060);
+        AppendSilence(b, 0.018);
+        AppendSquare(b, 700,  0.065);
+        AppendSilence(b, 0.018);
+        AppendSquare(b, 600,  0.060);
+        AppendSilence(b, 0.018);
+        AppendSquare(b, 1000, 0.055);
+        AppendSilence(b, 0.018);
+        AppendSquare(b, 750,  0.065);
+        AppendSilence(b, 0.018);
+        AppendSquare(b, 550,  0.095);
+        return b.ToArray();
+    }
+
+    // ── 発話パターン 5〜7: グライド＋ビブラート ──────────────────────────────
+
+    static short[] TalkDore()
+    {
+        var b = new List<short>();
+        AppendGlide(b,   500, 660, 0.06);
+        AppendVibrato(b, 660,      0.07, 6, 15);
+        AppendGlide(b,   660, 490, 0.04);
+        AppendGlide(b,   490, 710, 0.065);
+        AppendVibrato(b, 710,      0.08, 7, 20);
+        AppendGlide(b,   710, 860, 0.07);
+        AppendVibrato(b, 860,      0.07, 8, 25);
+        return b.ToArray();
+    }
+
+    static short[] TalkKyui()
+    {
+        var b = new List<short>();
+        AppendGlide(b,   580, 1040, 0.055);
+        AppendVibrato(b, 1040,       0.055, 8, 30);
+        AppendGlide(b,   1040, 1220, 0.04);
+        AppendSilence(b, 0.022);
+        AppendGlide(b,   1220,  760, 0.075);
+        AppendVibrato(b, 760,        0.07, 6, 16);
+        return b.ToArray();
+    }
+
+    static short[] TalkUwa()
+    {
+        var b = new List<short>();
+        AppendGlide(b,   360, 550, 0.08);
+        AppendVibrato(b, 550,      0.06, 5, 12);
+        AppendGlide(b,   550, 720, 0.09);
+        AppendVibrato(b, 720,      0.13, 6, 24);
+        AppendGlide(b,   720, 600, 0.06);
+        AppendVibrato(b, 600,      0.08, 7, 18);
+        AppendGlide(b,   600, 400, 0.10);
+        return b.ToArray();
+    }
+
+    static readonly Func<short[]>[] TalkBuilders =
+    [
+        TalkPopo, TalkPipopo, TalkPipapopo, TalkPopopipapopo,
+        TalkDore, TalkKyui, TalkUwa,
+    ];
+
+    void PlayTalkSound()
+    {
+        var samples = TalkBuilders[_rng.Next(TalkBuilders.Length)]();
+        PlaySamples(samples);
+    }
+
+    static void PlaySamples(short[] samples)
+    {
+        var fmt = new WAVEFORMATEX
+        {
+            wFormatTag      = WAVE_FORMAT_PCM,
+            nChannels       = 1,
+            nSamplesPerSec  = SampleRate,
+            wBitsPerSample  = 16,
+            nBlockAlign     = 2,
+            nAvgBytesPerSec = SampleRate * 2,
+        };
+
+        if (waveOutOpen(out var hWave, 0xFFFFFFFF, ref fmt, IntPtr.Zero, IntPtr.Zero, CALLBACK_NULL) != 0)
+            return;
+
+        var bytes = new byte[samples.Length * 2];
+        Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
+        var gch = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+
+        var hdr = new WAVEHDR
+        {
+            lpData         = gch.AddrOfPinnedObject(),
+            dwBufferLength = (uint)bytes.Length,
+        };
+        uint hdrSize = (uint)Marshal.SizeOf<WAVEHDR>();
+
+        waveOutPrepareHeader(hWave, ref hdr, hdrSize);
+        waveOutWrite(hWave, ref hdr, hdrSize);
+
+        int waitMs = (int)(samples.Length * 1000.0 / SampleRate) + 80;
+        Thread.Sleep(waitMs);
+
+        waveOutReset(hWave);
+        waveOutUnprepareHeader(hWave, ref hdr, hdrSize);
+        gch.Free();
+        waveOutClose(hWave);
+    }
 
     // ── 描画 ────────────────────────────────────────────────────────────────
 
@@ -282,8 +578,10 @@ sealed class ScreensaverForm : Form
         g.Clear(Color.Black);
 
         bool  open = _t >= _blinkUntil;
-        float goX  = _gx * 3f;
-        float goY  = _gy * 3f;
+        // カメラ追跡中は視線の振れ幅を拡大（15px）、通常は本家準拠（3px）
+        float gazeRange = _camTgx.HasValue ? 15f : 3f;
+        float goX  = _gx * gazeRange;
+        float goY  = _gy * gazeRange;
 
         // ── 目の描画（本家 Eye.cpp の draw() をそのまま移植） ─────────────
         // isLeft: false = 画面左（本家「右目」相当）
@@ -302,15 +600,20 @@ sealed class ScreensaverForm : Form
                 return;
             }
 
+            // Surprised: 目を大きく描く（白丸のみ）
+            float drawR = (_expr == Expr.Surprised) ? r * 2.0f : r;
+
             // ベースの白丸
-            Circle(exc, eyc, r, _white);
+            Circle(exc, eyc, drawR, _white);
+
+            if (_expr == Expr.Surprised) return;
 
             if (_expr == Expr.Angry || _expr == Expr.Sad)
             {
                 // 目の上部を斜め三角でカット → 怒り・悲しみ表情
                 // 怒り: 内側(中央寄り)の上角をカット
                 // 悲しみ: 外側の上角をカット（怒りの左右反転）
-                float x0   = exc - r, y0 = eyc - r, x1 = exc + r;
+                float x0   = exc - drawR, y0 = eyc - drawR, x1 = exc + drawR;
                 bool  cond = (!isLeft) != !(_expr == Expr.Sad);
                 float x2   = cond ? x0 : x1;
                 Triangle(x0, y0, x1, y0, x2, eyc, _black);
@@ -319,14 +622,14 @@ sealed class ScreensaverForm : Form
             if (_expr == Expr.Happy || _expr == Expr.Sleepy)
             {
                 // 目の下半分を矩形でマスク
-                float y0 = eyc - r;
-                float x0 = exc - r, w = r * 2f + 4f, h = r + 2f;
+                float y0 = eyc - drawR;
+                float x0 = exc - drawR, w = drawR * 2f + 4f, h = drawR + 2f;
 
                 if (_expr == Expr.Happy)
                 {
                     // Happy: さらに内側を黒丸で抜いて ◠ 形に
-                    y0 += r;                         // マスク開始位置を中心に下げる
-                    Circle(exc, eyc, r / 1.5f, _black);
+                    y0 += drawR;                         // マスク開始位置を中心に下げる
+                    Circle(exc, eyc, drawR / 1.5f, _black);
                 }
 
                 Rect(x0, y0, w, h, _black);
@@ -336,10 +639,19 @@ sealed class ScreensaverForm : Form
         DrawEye(Cx - EyeSpread, false);   // 画面左（本家「右目」）
         DrawEye(Cx + EyeSpread, true);    // 画面右（本家「左目」）
 
-        // ── 口（呼吸アニメーション ±2px） ────────────────────────────────
+        // ── 口（Surprised のときは丸口、通常は呼吸アニメーション ±2px） ─
 
-        float breath = (float)Math.Sin(_t * 1.6) * 2f;
-        Rect(Cx - MaxW / 2f, MouthY - MinH / 2f + breath, MaxW, MinH, _white);
+        if (_expr == Expr.Surprised)
+        {
+            // 驚きの「口」: 白い四角口
+            float mw = 28f, mh = 22f;
+            Rect(Cx - mw / 2f, MouthY - mh / 2f, mw, mh, _white);
+        }
+        else
+        {
+            float breath = (float)Math.Sin(_t * 1.6) * 2f;
+            Rect(Cx - MaxW / 2f, MouthY - MinH / 2f + breath, MaxW, MinH, _white);
+        }
     }
 
     // ── システム状態取得 ─────────────────────────────────────────────────────
@@ -380,11 +692,13 @@ sealed class ScreensaverForm : Form
 
     void UpdateExpr()
     {
-        if      (_cpuLoad > 0.7)       _expr = Expr.Angry;    // CPU 高負荷
-        else if (_isCharging)          _expr = Expr.Happy;    // 充電中
-        else if (_battery < 0.2f)      _expr = Expr.Sad;      // バッテリー残量僅少
-        else if (_t > SleepyAfterSec)  _expr = Expr.Sleepy;   // 長時間表示
-        else                           _expr = Expr.Neutral;
+        // Surprised は Tick() 内でリアルタイムに設定されるため UpdateExpr では扱わない
+        if      (_t < _surprisedUntil)  return;                // 検知直後は維持
+        if      (_cpuLoad > 0.7)        _expr = Expr.Angry;   // CPU 高負荷
+        else if (_isCharging)           _expr = Expr.Happy;   // 充電中
+        else if (_battery < 0.2f)       _expr = Expr.Sad;     // バッテリー残量僅少
+        else if (_t > SleepyAfterSec)   _expr = Expr.Sleepy;  // 長時間表示
+        else                            _expr = Expr.Neutral;
     }
 
     // ── 入力処理: 何か操作があればスクリーンセーバーを終了 ───────────────────
@@ -428,6 +742,7 @@ sealed class ScreensaverForm : Form
     {
         if (disposing)
         {
+            _camera?.Dispose();
             _animTimer?.Dispose();
             _white.Dispose();
             _black.Dispose();
